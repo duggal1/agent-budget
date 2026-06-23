@@ -69,7 +69,7 @@ export async function compressMessages(
 
   // Build the conversation text for summarization
   const conversationText = middleMessages
-    .map((msg) => `[${msg.role}]: ${msg.content}`)
+    .map((msg) => `[${msg.role}]: ${msg.content ?? ''}`)
     .join('\n\n');
 
   // Call LLM to generate summary

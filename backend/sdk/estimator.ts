@@ -17,7 +17,7 @@ const CHARS_PER_TOKEN = 4;
 function estimateMessageTokens(messages: StepRequest['messages']): number {
   let chars = 0;
   for (const msg of messages) {
-    chars += msg.content.length;
+    if (msg.content) chars += msg.content.length;
     if (msg.tool_call_id) chars += msg.tool_call_id.length;
     if (msg.name) chars += msg.name.length;
   }

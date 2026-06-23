@@ -1,16 +1,45 @@
 {
-  "name": "agent-budget",
-  "version": "0.1.0",
+  "name": "@painitehq/agent-budget",
+  "version": "0.4.3",
+  "description": "Provider-agnostic budget enforcement SDK for LLM agents. Track token/cost/step usage, enforce limits, auto-compress, circuit-breaker, checkpoints, adaptive routing, and more.",
   "type": "module",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test:compressor": "tsx test-compressor.ts",
-    "test:events": "tsx test-events.ts"
+    "test": "tsx test-gauntlet.ts",
+    "test:compressor": "tsx test-compressor.ts"
+  },
+  "keywords": [
+    "openrouter",
+    "agent",
+    "budget",
+    "token",
+    "cost",
+    "llm",
+    "circuit-breaker",
+    "checkpoint",
+    "rate-limit"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duggal1/agent-budget.git"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

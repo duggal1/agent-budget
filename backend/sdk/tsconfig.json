@@ -5,13 +5,26 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
     "strict": true,
-    "noEmit": true,
+    "declaration": true,
+    "outDir": "dist",
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": [
+    "index.ts",
+    "types.ts",
+    "tracker.ts",
+    "budget.ts",
+    "pricing.ts",
+    "compressor.ts",
+    "estimator.ts",
+    "circuit-breaker.ts",
+    "router.ts",
+    "checkpoint.ts",
+    "events.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
 }

@@ -15,6 +15,23 @@ export interface BudgetLimits {
 
 export type ExceededStrategy = 'abort' | ((usage: BudgetUsage) => void);
 
+// ─── Executor ─────────────────────────────────────────────────────────────────
+
+export interface ExecutorResult {
+  model: string;
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  choices: Array<{ message: { role: string; content: string }; finish_reason: string }>;
+}
+
+/**
+ * Custom API executor. Replaces the built-in OpenRouter fetch.
+ * Receives the StepRequest (after adaptive routing, auto-compress, etc.) and
+ * returns a normalized response. Use this to integrate any LLM provider.
+ */
+export type AgentExecutor = (
+  request: StepRequest,
+) => Promise<ExecutorResult>;
+
 // ─── Options ─────────────────────────────────────────────────────────────────
 
 export interface BudgetOptions {
@@ -44,6 +61,13 @@ export interface BudgetOptions {
   };
   onEvent?: (event: import('./events.js').AgentBudgetEvent) => void;
   warningThreshold?: number;      // fraction of any limit that triggers budget:warning (default 0.75)
+  telemetry?: {
+    enabled: boolean;             // enable OpenTelemetry spans
+    tracer?: unknown;             // optional pre-configured tracer
+  };
+  executor?: AgentExecutor;       // custom API executor (replaces built-in OpenRouter fetch)
+  baseUrl?: string;               // API base URL (default: https://openrouter.ai/api/v1)
+  defaultHeaders?: Record<string, string>; // custom HTTP headers for built-in fetch
 }
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
@@ -103,19 +127,29 @@ export interface BudgetExceededError {
 
 export interface OpenRouterMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | null;
   tool_call_id?: string;
   name?: string;
 }
 
 export interface StepRequest {
-  model: string;
+  model: string;         // Any OpenRouter model slug: 'openai/gpt-4o', 'anthropic/claude-sonnet', etc.
   messages: OpenRouterMessage[];
   tools?: unknown[];
   temperature?: number;
   max_tokens?: number;
+  stream?: boolean;
   [key: string]: unknown;
 }
+
+export interface StreamChunk {
+  type: 'token' | 'done' | 'error';
+  token?: string;
+  response?: OpenRouterResponse;
+  error?: string;
+}
+
+export type TokenCallback = (token: string) => void;
 
 export interface OpenRouterResponse {
   id: string;
@@ -123,6 +157,12 @@ export interface OpenRouterResponse {
   choices: Array<{
     message: OpenRouterMessage;
     finish_reason: string;
+    native_finish_reason?: string | null;
+    error?: {
+      code: number;
+      message: string;
+      metadata?: Record<string, unknown>;
+    };
   }>;
   usage: {
     prompt_tokens: number;

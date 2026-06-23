@@ -6,12 +6,14 @@ import type {
   OpenRouterMessage,
   ExceededStrategy,
   CheckpointData,
+  AgentExecutor,
+  ExecutorResult,
 } from './types.js';
 import type { AgentBudgetEvent } from './events.js';
 import { CheckpointManager } from './checkpoint.js';
 import { UsageTracker } from './tracker.js';
 import { getModelPricing, calculateCost, invalidatePricingCache } from './pricing.js';
-import { checkLimits, BudgetError, RateLimitError } from './budget.js';
+import { checkLimits, BudgetError, RateLimitError, UpstreamError } from './budget.js';
 import {
   compressMessages as compressMessageHistory,
   estimateMessagesTokens,
@@ -21,7 +23,7 @@ import { CircuitBreaker } from './circuit-breaker.js';
 import { resolveModel, shouldLogDowngrade } from './router.js';
 import { AgentEventEmitter, WarningChecker } from './events.js';
 
-const OPENROUTER_CHAT = 'https://openrouter.ai/api/v1/chat/completions';
+const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ─── AgentBudget ─────────────────────────────────────────────────────────────
@@ -42,6 +44,11 @@ export class AgentBudget {
   private readonly emitter: AgentEventEmitter;
   private readonly warningChecker = new WarningChecker();
   private readonly warningThreshold: number;
+  private readonly telemetry: BudgetOptions['telemetry'];
+  private tracer: any = null;
+  private readonly executor?: AgentExecutor;
+  private readonly baseUrl: string;
+  private readonly defaultHeaders: Record<string, string>;
 
   constructor(options: BudgetOptions) {
     const l = options.limits;
@@ -69,6 +76,10 @@ export class AgentBudget {
       : null;
     this.emitter = new AgentEventEmitter(options.onEvent);
     this.warningThreshold = options.warningThreshold ?? 0.75;
+    this.telemetry = options.telemetry;
+    this.executor = options.executor;
+    this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+    this.defaultHeaders = options.defaultHeaders ?? {};
   }
 
   /**
@@ -80,6 +91,8 @@ export class AgentBudget {
     const stepIndex = this.tracker.stepCount();
 
     const stepStart = Date.now();
+    this._initTracer();
+    const stepSpan = this._startSpan('agent-budget.step');
 
     // ── Adaptive model routing: resolve model from fallback chain ────────────
     // Runs BEFORE pre-flight checks so that fallbackChainExhausted fires
@@ -138,6 +151,7 @@ export class AgentBudget {
     this._checkOrThrow(this.tracker.snapshot());
 
     // ── Fetch live pricing for this model ─────────────────────────────────────
+    const pricingSpan = this._startSpan('agent-budget.pricing');
     const pricing = await getModelPricing(
       request.model,
       this.apiKey,
@@ -146,6 +160,7 @@ export class AgentBudget {
         this.emitter.emit({ type: 'pricing:fetched', modelCount, cachedUntil });
       },
     );
+    pricingSpan?.end();
 
     // ── Pre-flight cost estimation ────────────────────────────────────────────
     if (this.limits.preflightCheck !== false && this.limits.maxCostUSD !== undefined) {
@@ -204,51 +219,25 @@ export class AgentBudget {
       model: request.model,
     });
 
-    // ── Build headers ─────────────────────────────────────────────────────────
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-    };
-    if (this.siteUrl)  headers['HTTP-Referer']       = this.siteUrl;
-    if (this.appTitle) headers['X-OpenRouter-Title']  = this.appTitle;
-
-    // ── Call OpenRouter (with 429 retry + exponential backoff) ───────────────
-    let res: Response;
-    const MAX_RETRIES = 3;
-    for (let attempt = 0; ; attempt++) {
-      res = await fetch(OPENROUTER_CHAT, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(request),
-      });
-
-      if (res.status === 429 && attempt < MAX_RETRIES) {
-        const retryAfter = parseInt(res.headers.get('retry-after') ?? '0', 10) || 0;
-        const backoff = retryAfter > 0
-          ? retryAfter * 1000
-          : Math.min(1000 * 2 ** attempt, 30000);
-        console.warn(`[agent-budget] Rate limited (429). Retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
-        await new Promise(r => setTimeout(r, backoff));
-        continue;
-      }
-
-      break;
+    // ── Execute the step (custom executor or built-in OpenRouter fetch) ──────
+    let response: OpenRouterResponse;
+    if (this.executor) {
+      const result = await this.executor({ ...request });
+      response = {
+        id: '',
+        model: result.model,
+        choices: result.choices.map(c => ({
+          message: c.message as OpenRouterMessage,
+          finish_reason: c.finish_reason,
+        })),
+        usage: result.usage,
+      };
+    } else {
+      response = await this._defaultFetch(request, stepIndex, pricing);
     }
-
-    if (!res.ok) {
-      const body = await res.text();
-      if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get('retry-after') ?? '0', 10) || 0;
-        throw new RateLimitError(429, retryAfter,
-          `[agent-budget] Rate limit exceeded after ${MAX_RETRIES} retries: ${body}`);
-      }
-      throw new Error(`[agent-budget] OpenRouter error ${res.status}: ${body}`);
-    }
-
-    const response = (await res.json()) as OpenRouterResponse;
     const durationMs = Date.now() - stepStart;
 
-    // ── Record this step ──────────────────────────────────────────────────────
+    // ── Record this step (before checks so circuit breaker can analyze it) ─────
     const inputTokens  = response.usage?.prompt_tokens     ?? 0;
     const outputTokens = response.usage?.completion_tokens ?? 0;
     const costUSD      = calculateCost(pricing, inputTokens, outputTokens);
@@ -301,11 +290,12 @@ export class AgentBudget {
           this.onExceeded(usage);
         }
 
+        this.tracker.rollback();
         throw new BudgetError(exceeded);
       }
     }
 
-    // ── Checkpoint: write after step succeeds but before post-step budget check ─
+    // ── Checkpoint: write after step succeeds ────────────────────────────────
     if (this.checkpointManager) {
       const responseMessage = response.choices?.[0]?.message;
       const checkpointMessages = responseMessage
@@ -320,8 +310,16 @@ export class AgentBudget {
     }
 
     // ── Post-step: check all limits including updated cost + token totals ──────
-    this._checkOrThrow(this.tracker.snapshot());
+    try {
+      this._checkOrThrow(this.tracker.snapshot());
+    } catch (err) {
+      // Roll back the tracker so the consumer can retry without stale data.
+      // The actual API spend is included in the error for transparency.
+      this.tracker.rollback();
+      throw err;
+    }
 
+    stepSpan?.end();
     return response;
   }
 
@@ -394,8 +392,8 @@ export class AgentBudget {
   }
 
   /**
-   * Returns the model that would be used by the adaptive router right now,
-   * or the default model from the last step request if routing is not configured.
+   * Returns the model that the adaptive router would use right now,
+   * or undefined if adaptive routing is not configured.
    */
   getCurrentModel(): string | undefined {
     if (!this.adaptiveRouting) return undefined;
@@ -466,6 +464,174 @@ export class AgentBudget {
 
   // ── Internal ────────────────────────────────────────────────────────────────
 
+  private _initTracer(): void {
+    if (!this.telemetry?.enabled || this.tracer) return;
+    try {
+      const otel = require('@opentelemetry/api') as { trace: { getTracer: (name: string) => unknown } };
+      this.tracer = otel.trace.getTracer('agent-budget');
+    } catch {
+      this.tracer = null;
+    }
+  }
+
+  private _startSpan(name: string): { end: () => void } | null {
+    if (!this.tracer) return null;
+    try {
+      const span = (this.tracer as any).startSpan(name);
+      return {
+        end: () => { try { span.end(); } catch {} }
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async _readStream(
+    res: Response,
+    model: string,
+    stepIndex: number,
+    stepStart: number,
+    pricing: import('./types.js').ModelPricing,
+  ): Promise<import('./types.js').OpenRouterResponse> {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    let responseId = '';
+    let responseModel = '';
+    let usage: import('./types.js').OpenRouterResponse['usage'] | null = null;
+    let streamError: { code: number; message: string } | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data) as any;
+          const choice = parsed.choices?.[0];
+
+          // Check for streamed provider error (finish_reason: "error" + choice.error)
+          if (choice?.error) {
+            streamError = { code: choice.error.code, message: choice.error.message };
+          }
+
+          // Emit token for each content delta
+          if (choice?.delta?.content) {
+            const token: string = choice.delta.content;
+            fullContent += token;
+            this.emitter.emit({ type: 'step:token', stepIndex, token });
+          }
+
+          // Capture usage — it appears in the final chunk before [DONE].
+          // With stream_options: { include_usage: true }, this chunk has
+          // an empty choices array and a usage object.
+          if (parsed.usage) {
+            usage = parsed.usage;
+          }
+
+          if (parsed.id) responseId = parsed.id;
+          if (parsed.model) responseModel = parsed.model;
+        } catch { /* skip malformed SSE lines */ }
+      }
+    }
+
+    // If a streamed error was captured, throw it so the budget layer
+    // doesn't record a fake zero-cost step.
+    if (streamError) {
+      throw new UpstreamError(streamError.code, streamError.message);
+    }
+
+    return {
+      id: responseId,
+      model: responseModel || model,
+      choices: [{
+        message: { role: 'assistant', content: fullContent },
+        finish_reason: 'stop',
+      }],
+      usage: usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    };
+  }
+
+  private async _defaultFetch(request: StepRequest, stepIndex: number, pricing: import('./types.js').ModelPricing): Promise<OpenRouterResponse> {
+    const headers: Record<string, string> = {
+      ...this.defaultHeaders,
+      Authorization: `Bearer ${this.apiKey}`,
+      'Content-Type': 'application/json',
+    };
+    if (this.siteUrl)  headers['HTTP-Referer']       = this.siteUrl;
+    if (this.appTitle) headers['X-OpenRouter-Title']  = this.appTitle;
+
+    // When streaming, include stream_options so usage data is returned
+    // in the final chunk. Respect any user-supplied value.
+    const body: Record<string, unknown> = { ...request };
+    if (body.stream === true && !('stream_options' in body)) {
+      body.stream_options = { include_usage: true };
+    }
+
+    const url = `${this.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+    let res: Response;
+    const MAX_RETRIES = 3;
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      if (res.status === 429 && attempt < MAX_RETRIES) {
+        const retryAfter = parseInt(res.headers.get('retry-after') ?? '0', 10) || 0;
+        const backoff = retryAfter > 0
+          ? retryAfter * 1000
+          : Math.min(1000 * 2 ** attempt, 30000);
+        console.warn(`[agent-budget] Rate limited (429). Retrying in ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+
+      break;
+    }
+
+    if (!res.ok) {
+      const bodyText = await res.text();
+      if (res.status === 402) {
+        throw new Error(`[agent-budget] Insufficient credits (402): ${bodyText}`);
+      }
+      if (res.status === 502) {
+        throw new Error(`[agent-budget] Provider unavailable (502): ${bodyText}`);
+      }
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('retry-after') ?? '0', 10) || 0;
+        throw new RateLimitError(429, retryAfter,
+          `[agent-budget] Rate limit exceeded after ${MAX_RETRIES} retries: ${bodyText}`);
+      }
+      throw new Error(`[agent-budget] API error ${res.status}: ${bodyText}`);
+    }
+
+    const response = request.stream === true
+      ? await this._readStream(res, request.model, stepIndex, Date.now(), pricing)
+      : (await res.json()) as OpenRouterResponse;
+
+    // OpenRouter may return HTTP 200 with an error inside choices[0].
+    // This happens when the provider rejects the request (insufficient
+    // credits, guardrail, provider outage, etc.).
+    const choiceError = response.choices?.[0]?.error;
+    if (choiceError) {
+      throw new UpstreamError(choiceError.code, choiceError.message, choiceError.metadata);
+    }
+
+    return response;
+  }
+
   private _checkOrThrow(usage: BudgetUsage): void {
     const exceeded = checkLimits(usage, this.limits);
     if (exceeded) {
@@ -492,7 +658,7 @@ export function createAgentBudget(options: BudgetOptions): AgentBudget {
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 
-export { BudgetError, RateLimitError } from './budget.js';
+export { BudgetError, RateLimitError, UpstreamError } from './budget.js';
 export { getModelPricing, calculateCost, invalidatePricingCache, setModelPricing } from './pricing.js';
 export { estimateStepCost } from './estimator.js';
 export { CircuitBreaker } from './circuit-breaker.js';
@@ -517,4 +683,8 @@ export type {
   ExceededReason,
   ExceededStrategy,
   ModelPricing,
+  StreamChunk,
+  TokenCallback,
+  AgentExecutor,
+  ExecutorResult,
 } from './types.js';

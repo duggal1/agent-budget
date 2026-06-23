@@ -30,6 +30,27 @@ export class RateLimitError extends Error {
   }
 }
 
+/**
+ * An error returned by the provider inside the chat completion response.
+ * This happens when OpenRouter returns HTTP 200 but `choices[0].error`
+ * contains a provider-level error (e.g., 402 insufficient credits,
+ * guardrail block, provider outage, etc.).
+ */
+export class UpstreamError extends Error {
+  public readonly code: number;
+  public readonly metadata?: Record<string, unknown>;
+  public readonly statusCode: number;
+
+  constructor(code: number, message: string, metadata?: Record<string, unknown>) {
+    super(message ? `[agent-budget] Provider error ${code}: ${message}` : `[agent-budget] Provider error ${code}`);
+    this.name = 'UpstreamError';
+    this.code = code;
+    this.metadata = metadata;
+    // Map known OpenRouter error codes to HTTP-like status
+    this.statusCode = code;
+  }
+}
+
 // ─── Checker ─────────────────────────────────────────────────────────────────
 
 /**

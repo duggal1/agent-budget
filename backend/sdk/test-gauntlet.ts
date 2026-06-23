@@ -103,6 +103,7 @@ async function stepOnce(
   agent: AgentBudget,
   req: StepRequest,
   label: string,
+  attempt = 1,
 ): Promise<{ response?: any; modelUsed: string; error?: any }> {
   const model = USE_FALLBACK ? FALLBACK : PRIMARY;
   req.model = model;
@@ -115,8 +116,8 @@ async function stepOnce(
     }
     return { response: r, modelUsed: r.model };
   } catch (err: any) {
-    // openrouter/free routes to unpredictable providers that may 429/402/etc.
-    // Retry once with FALLBACK for ANY error to isolate SDK bugs from provider flakiness.
+    const isTransient = err instanceof RateLimitError || err?.message?.includes('429');
+    // Retry ANY error once with FALLBACK if on primary
     if (!USE_FALLBACK) {
       console.log(`  ⚠ ${label}: ${err.message?.split('\n')[0] || err.code || 'error'}. Falling back to ${FALLBACK}...`);
       req.model = FALLBACK;
@@ -128,6 +129,12 @@ async function stepOnce(
       } catch (e2: any) {
         return { error: e2, modelUsed: FALLBACK };
       }
+    }
+    // Retry transient errors one more time even on fallback (free-tier flakiness)
+    if (isTransient && attempt < 2) {
+      console.log(`  ⚡ ${label}: transient error, retrying...`);
+      await new Promise(r => setTimeout(r, 3000));
+      return stepOnce(agent, req, label, attempt + 1);
     }
     return { error: err, modelUsed: model };
   }
@@ -541,9 +548,9 @@ async function test9() {
   divider(9, 'wallTime enforces across steps');
   injectPricing();
 
-  // Each iteration: ~1s step + ~1s delay = ~2s. Set limit so that
-  // inter-step delays accumulate past it around step 5-6.
-  const WALL_LIMIT = 20000;
+  // Each iteration: ~1s step + ~1s delay = ~2s. Set limit generous enough
+  // to absorb free-tier retry storms (openrouter/free can take 15-25s per step).
+  const WALL_LIMIT = 35000;
   const DELAY = 1000;
 
   const agent = new AgentBudget({

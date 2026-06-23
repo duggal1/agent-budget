@@ -34,11 +34,22 @@ export async function getModelPricing(
   const now = Date.now();
 
   if (!cache || now - cache.fetchedAt > cacheTTLMs) {
-    cache = await fetchAllPricing(apiKey, now);
-    onFreshFetch?.(cache.data.size, cache.fetchedAt + cacheTTLMs);
+    try {
+      cache = await fetchAllPricing(apiKey, now);
+      onFreshFetch?.(cache.data.size, cache.fetchedAt + cacheTTLMs);
+    } catch (err) {
+      // If fetch fails, use existing cache (even if expired) rather than throwing.
+      // If no cache exists at all, return zero pricing silently.
+      if (cache) {
+        console.warn(`[agent-budget] Failed to refresh pricing cache, using stale data: ${(err as Error).message?.split('\n')[0]}`);
+      } else {
+        console.warn(`[agent-budget] Failed to fetch pricing for "${modelId}". Cost tracking will be 0.`);
+        return { promptPerToken: 0, completionPerToken: 0 };
+      }
+    }
   }
 
-  const pricing = cache.data.get(modelId);
+  const pricing = cache!.data.get(modelId);
 
   if (!pricing) {
     console.warn(

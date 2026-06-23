@@ -5,6 +5,7 @@ import type { BudgetExceededError, ExceededReason } from './types.js';
 
 export type AgentBudgetEvent =
   | { type: 'step:start';         stepIndex: number; model: string; estimatedCostUSD?: number }
+  | { type: 'step:token';         stepIndex: number; token: string }
   | { type: 'step:end';           stepIndex: number; model: string; inputTokens: number; outputTokens: number; costUSD: number; durationMs: number }
   | { type: 'budget:warning';     reason: ExceededReason; pctConsumed: number; remaining: number }
   | { type: 'budget:exceeded';    exceeded: BudgetExceededError }
@@ -17,6 +18,7 @@ export type AgentBudgetEvent =
 
 export interface AgentBudgetEventMap {
   'step:start':         AgentBudgetEvent & { type: 'step:start' };
+  'step:token':         AgentBudgetEvent & { type: 'step:token' };
   'step:end':           AgentBudgetEvent & { type: 'step:end' };
   'budget:warning':     AgentBudgetEvent & { type: 'budget:warning' };
   'budget:exceeded':    AgentBudgetEvent & { type: 'budget:exceeded' };

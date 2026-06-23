@@ -49,4 +49,13 @@ export class UsageTracker {
     this.totalOutputTokens = 0;
     this.totalCostUSD = 0;
   }
+
+  rollback(): StepUsage | null {
+    const last = this.stepHistory.pop();
+    if (!last) return null;
+    this.totalInputTokens -= last.inputTokens;
+    this.totalOutputTokens -= last.outputTokens;
+    this.totalCostUSD -= last.costUSD;
+    return last;
+  }
 }
