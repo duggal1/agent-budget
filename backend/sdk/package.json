@@ -1,6 +1,6 @@
 {
   "name": "@painitehq/agent-budget",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Provider-agnostic budget enforcement SDK for LLM agents. Track token/cost/step usage, enforce limits, auto-compress, circuit-breaker, checkpoints, adaptive routing, and more.",
   "type": "module",
   "main": "./dist/index.js",

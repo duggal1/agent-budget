@@ -1,9 +1,9 @@
-# @painitehq/agent-budget
+# agent-budget
 
-Budget-aware enforcement layer for LLM agents. Track token, cost, and step usage in real time — enforce limits before and after every LLM call. Works with any provider.
+Budget-aware enforcement layer for LLM agents. Track token, cost, and step usage in real time. Enforce limits before and after every LLM call. Works with any provider.
 
 ```
-npm install @painitehq/agent-budget
+npm install budget-agent
 ```
 
 ## Quick start
@@ -11,7 +11,7 @@ npm install @painitehq/agent-budget
 You bring your own API key and model. The SDK calls your provider.
 
 ```ts
-import { AgentBudget } from '@painitehq/agent-budget';
+import { AgentBudget } from 'budget-agent';
 
 const agent = new AgentBudget({
   apiKey: process.env.OPENROUTER_API_KEY,
@@ -138,7 +138,7 @@ The router downgrades the model tier as the budget depletes. Each `step()` check
 Use any LLM provider — OpenAI, Anthropic, Ollama, local models, or the OpenRouter Agent SDK:
 
 ```ts
-import { AgentBudget } from '@painitehq/agent-budget';
+import { AgentBudget } from 'budget-agent';
 import OpenAI from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
