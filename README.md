@@ -6,12 +6,6 @@ Budget enforcement for LLM agents. Track token, cost, and step usage in real tim
 npm install budget-agent
 ```
 
-Or if you use the scoped package:
-
-```
-npm install @painitehq/agent-budget
-```
-
 ## Why
 
 LLM calls cost money. Agent loops multiply that cost across every step. Without guardrails, a runaway agent can burn through credits before you notice.
